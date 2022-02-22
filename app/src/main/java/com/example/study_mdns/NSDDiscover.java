@@ -14,6 +14,9 @@ import java.io.UnsupportedEncodingException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketAddress;
+import java.util.Iterator;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import timber.log.Timber;
 
@@ -27,6 +30,8 @@ public class NSDDiscover {
     private int mPortFound;
     private DISCOVERY_STATUS mCurrentDiscoveryStatus = DISCOVERY_STATUS.OFF;
     MainActivity mainActivity = new MainActivity();
+    private final AtomicBoolean resolveListenerBusy = new AtomicBoolean(false);
+    private final ConcurrentLinkedQueue<NsdServiceInfo> pendingNsdServices = new ConcurrentLinkedQueue<>();
 
     private enum DISCOVERY_STATUS{
         ON,
@@ -60,6 +65,7 @@ public class NSDDiscover {
     }
 
     public void sayHello(){
+        Timber.e("sayHello()...");
         if(mHostFound == null || mPortFound <= 0){
             Toast.makeText(mContext, mContext.getString(R.string.devices_not_found_toast), Toast.LENGTH_LONG).show();
             return;
@@ -71,9 +77,13 @@ public class NSDDiscover {
     NsdManager.ResolveListener mResolveListener = new NsdManager.ResolveListener() {
         @Override
         public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
-            Timber.e("Resolve Failed. %s", errorCode);
-            Constants.theLog = "Resolve Failed.\n\n" + Constants.theLog;
+            Timber.e("Resolve Failed. trying next in queue%s", errorCode);
+            Constants.theLog = "Resolve Failed. trying next in queue\n\n" + Constants.theLog;
            MainActivity.getmInstanceActivity().addMessage();
+
+           resolveNextInQueue();
+
+
         }
 
         @Override
@@ -100,10 +110,24 @@ public class NSDDiscover {
            MainActivity.getmInstanceActivity().addMessage();
 
             //이거 없애면 discover 계속 루프
-            mNsdManager.stopServiceDiscovery(mDiscoveryListener);
+            //mNsdManager.stopServiceDiscovery(mDiscoveryListener);
+
+            resolveNextInQueue();
+
             setHostAndPortValues(serviceInfo);
             if(mListener != null){
                 mListener.serviceDiscovered(mHostFound, mPortFound);
+            }
+
+
+        }
+
+        private void resolveNextInQueue() {
+            NsdServiceInfo nextNsdService = pendingNsdServices.poll();
+            if (nextNsdService != null) {
+                mNsdManager.resolveService(nextNsdService, mResolveListener);
+            } else {
+                resolveListenerBusy.set(false);
             }
         }
     };
@@ -172,7 +196,7 @@ public class NSDDiscover {
 
         @Override
         public void onServiceFound(NsdServiceInfo service) {
-            Timber.e("onServiceFound(). Service discovery success%s", service);
+            Timber.e("onServiceFound(). Service discovery success %s", service);
             Constants.theLog = "onServiceFound(). Service discovery success" + service + "\n\n" + Constants.theLog;
             MainActivity.getmInstanceActivity().addMessage();
             if (!service.getServiceType().equals(Constants.SERVICE_TYPE)) {
@@ -186,13 +210,29 @@ public class NSDDiscover {
                 Timber.e("running resolveService().");
                 Constants.theLog = "running resolveService().\n\n" + Constants.theLog;
                 MainActivity.getmInstanceActivity().addMessage();
-                mNsdManager.resolveService(service, mResolveListener);
+                //mNsdManager.resolveService(service, mResolveListener);
+                if(resolveListenerBusy.compareAndSet(false, true)) {
+                    Timber.e("running resolveService().");
+                    Constants.theLog = "running resolveService().\n\n" + Constants.theLog;
+                    mNsdManager.resolveService(service, mResolveListener);
+                }
+                else {
+                    pendingNsdServices.add(service);
+                }
             }
         }
 
         @Override
         public void onServiceLost(NsdServiceInfo service) {
-            Timber.e("service lost%s", service);
+            Timber.e("service lost... %s", service);
+            Timber.e("checking if there's any left in pendingNsdServices...");
+            Constants.theLog = "checking if there's any left in pendingNsdServices...\nservice lost...\n\n" + Constants.theLog;
+            MainActivity.getmInstanceActivity().addMessage();
+            Iterator<NsdServiceInfo> iterator = pendingNsdServices.iterator();
+            while (iterator.hasNext()) {
+                if (iterator.next().getServiceName().equals(service.getServiceName()))
+                    iterator.remove();
+            }
         }
 
         @Override
